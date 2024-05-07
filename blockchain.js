@@ -1,5 +1,8 @@
 "use strict";
 
+const { MerkleTree } = require('merkletree.js');
+const SHA256 = require('crypto-js/sha256'); 
+
 // Network message constants
 const MISSING_BLOCK = "MISSING_BLOCK";
 const POST_TRANSACTION = "POST_TRANSACTION";
@@ -22,6 +25,8 @@ const DEFAULT_TX_FEE = 1;
 // Note that the genesis block is always considered to be confirmed.
 const CONFIRMED_DEPTH = 6;
 
+const TARGET_BLOCK_TIME = 10 * 60 * 1000; // 10 minutes in milliseconds
+const DIFFICULTY_ADJUSTMENT_INTERVAL = 2016; // number of blocks
 
 /**
  * The Blockchain class tracks configuration information and settings for the
@@ -91,32 +96,16 @@ module.exports = class Blockchain {
    * @returns {Block}
    */
   static deserializeBlock(o) {
-    if (o instanceof this.instance.blockClass) {
-      return o;
-    }
+    let block = new Block(data.rewardAddr, null, data.target, data.coinbaseReward);
+    block.transactions = data.transactions; 
+    block.rebuildMerkleTree(); 
+    return block;
+  }
 
-    let b = new this.instance.blockClass();
-    b.chainLength = parseInt(o.chainLength, 10);
-    b.timestamp = o.timestamp;
-
-    if (b.isGenesisBlock()) {
-      // Balances need to be recreated and restored in a map.
-      o.balances.forEach(([clientID,amount]) => {
-        b.balances.set(clientID, amount);
-      });
-    } else {
-      b.prevBlockHash = o.prevBlockHash;
-      b.proof = o.proof;
-      b.rewardAddr = o.rewardAddr;
-      // Likewise, transactions need to be recreated and restored in a map.
-      b.transactions = new Map();
-      if (o.transactions) o.transactions.forEach(([txID,txJson]) => {
-        let tx = this.makeTransaction(txJson);
-        b.transactions.set(txID, tx);
-      });
-    }
-
-    return b;
+  rebuildMerkleTree() {
+    // Map transactions 
+    const leaves = this.transactions.map(tx => SHA256(JSON.stringify(tx)));
+    this.merkleTree = new MerkleTree(leaves, SHA256);
   }
 
   /**
@@ -182,10 +171,34 @@ module.exports = class Blockchain {
   static createInstance(cfg) {
     this.instance = new Blockchain(cfg);
     this.instance.genesis = this.makeGenesis();
+
+    this.targetBlockTime = cfg.targetBlockTime || TARGET_BLOCK_TIME;
+    this.difficultyAdjustmentInterval = cfg.difficultyAdjustmentInterval || DIFFICULTY_ADJUSTMENT_INTERVAL;
+
     return this.instance;
   }
 
+  adjustDifficulty() {
+    const lastAdjustmentBlock = this.chain.length - this.difficultyAdjustmentInterval;
+    if (this.chain.length % this.difficultyAdjustmentInterval === 0 && lastAdjustmentBlock >= 0) {
+      let oldTimestamp = this.chain[lastAdjustmentBlock].timestamp;
+      let newTimestamp = this.chain[this.chain.length - 1].timestamp;
+      let timeTaken = newTimestamp - oldTimestamp;
+      let expectedTime = this.targetBlockTime * this.difficultyAdjustmentInterval;
 
+      if (timeTaken < expectedTime / 2) {
+        this.powTarget = this.powTarget / 2n; // Increase difficulty
+      } else if (timeTaken > expectedTime * 2) {
+        this.powTarget = this.powTarget * 2n; // Decrease difficulty
+      }
+    }
+  }
+
+  addBlock(newBlock) {
+    // Check the validity, add the block, etc.
+    this.chain.push(newBlock);
+    this.adjustDifficulty(); // Adjust difficulty
+}
   /**
    * Constructor for the Blockchain configuration.  This constructor should not
    * be called outside of the class; nor should it be called more than once.
